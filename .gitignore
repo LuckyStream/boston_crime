@@ -1,0 +1,6 @@
+.ipynb_checkpoints/
+.Rhistory
+*.csv
+*.xlsx
+.DS_Store
+
