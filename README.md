@@ -3,8 +3,9 @@
 DS 4420 Final Project — Northeastern University
 
 ## Overview
-We use two machine learning methods to analyze crime patterns in Boston:
+We use three machine learning methods to analyze crime patterns in Boston:
 - Time Series (SARIMA) to forecast monthly crime counts
+- Neural Network to use MLP to classify shooting incidents from temporal and spatial features
 - Bayesian Regression to model crime counts by district (coming soon)
 
 ## Data
