@@ -1,0 +1,280 @@
+---
+title: 'Bayesian Logistic Regression: Predicting Shooting Incidents in Boston'
+author: "DS 4420 Final Project"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Load Libraries
+
+```{r}
+library(ggplot2)
+library(dplyr)
+```
+
+## Load and Prepare Data
+
+```{r}
+df <- read.csv("../data/boston_crime_combined.csv")
+
+# clean up SHOOTING column
+df$SHOOTING <- ifelse(df$SHOOTING %in% c(1, "Y"), 1, 0)
+df$SHOOTING[is.na(df$SHOOTING)] <- 0
+
+# keep only relevant columns
+df <- df[, c("SHOOTING", "MONTH", "HOUR", "DAY_OF_WEEK", "DISTRICT")]
+
+# data is already cleaned in data_prep, just double check
+df <- df[complete.cases(df), ]
+
+# encode DAY_OF_WEEK as numeric
+day_levels <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+df$DAY_OF_WEEK <- as.numeric(factor(df$DAY_OF_WEEK, levels = day_levels))
+
+cat("Size after cleaning:", nrow(df), "\n")
+cat("Any NAs:", anyNA(df), "\n")
+cat("Shooting distribution:\n")
+print(table(df$SHOOTING))
+```
+
+## Undersample to Balance Classes
+
+```{r}
+set.seed(42)
+
+shooting_yes <- df[df$SHOOTING == 1, ]
+shooting_no  <- df[df$SHOOTING == 0, ]
+
+# randomly sample same number of non-shooting as shooting
+shooting_no_sampled <- shooting_no[sample(nrow(shooting_no), nrow(shooting_yes)), ]
+
+df_balanced <- rbind(shooting_yes, shooting_no_sampled)
+df_balanced <- df_balanced[sample(nrow(df_balanced)), ]
+
+cat("Balanced dataset size:", nrow(df_balanced), "\n")
+cat("Shooting distribution after undersampling:\n")
+print(table(df_balanced$SHOOTING))
+```
+
+## Build Design Matrix
+
+```{r}
+# one-hot encode DISTRICT
+district_dummies <- model.matrix(~ DISTRICT - 1, data = df_balanced)
+
+# combine all features into X matrix
+X <- cbind(
+  intercept = 1,
+  month     = df_balanced$MONTH,
+  hour      = df_balanced$HOUR,
+  day       = df_balanced$DAY_OF_WEEK,
+  district_dummies
+)
+
+y <- df_balanced$SHOOTING
+
+cat("Design matrix dimensions:", dim(X), "\n")
+```
+
+## Train / Test Split
+
+```{r}
+set.seed(42)
+
+n <- nrow(X)
+train_idx <- sample(1:n, size = floor(0.8 * n))
+
+X_train <- X[train_idx, ]
+X_test  <- X[-train_idx, ]
+y_train <- y[train_idx]
+y_test  <- y[-train_idx]
+
+cat("Train size:", nrow(X_train), "\n")
+cat("Test size:", nrow(X_test), "\n")
+```
+
+## Bayesian Logistic Regression via Metropolis-Hastings
+
+```{r}
+# sigmoid function
+sigmoid <- function(z) 1 / (1 + exp(-z))
+
+# log likelihood of logistic regression
+log_likelihood <- function(beta, X, y) {
+  p <- sigmoid(X %*% beta)
+  p <- pmax(p, 1e-10)
+  p <- pmin(p, 1 - 1e-10)
+  sum(y * log(p) + (1 - y) * log(1 - p))
+}
+
+# log prior: Normal(0, 1) on all coefficients
+log_prior <- function(beta) {
+  sum(dnorm(beta, mean = 0, sd = 1, log = TRUE))
+}
+
+# log posterior = log likelihood + log prior
+log_posterior <- function(beta, X, y) {
+  log_likelihood(beta, X, y) + log_prior(beta)
+}
+```
+
+```{r}
+# Metropolis-Hastings sampler
+run_mh <- function(X, y, n_iter = 3000, step_size = 0.02) {
+  p <- ncol(X)
+  
+  beta_current <- rep(0, p)
+  lp_current   <- log_posterior(beta_current, X, y)
+  
+  samples  <- matrix(0, nrow = n_iter, ncol = p)
+  accepted <- 0
+  
+  for (i in 1:n_iter) {
+    beta_proposed <- beta_current + rnorm(p, sd = step_size)
+    lp_proposed   <- log_posterior(beta_proposed, X, y)
+    
+    # skip if log posterior is NaN or Inf
+    if (is.nan(lp_proposed) || is.infinite(lp_proposed)) {
+      samples[i, ] <- beta_current
+      next
+    }
+    
+    log_ratio <- lp_proposed - lp_current
+    
+    if (log(runif(1)) < log_ratio) {
+      beta_current <- beta_proposed
+      lp_current   <- lp_proposed
+      accepted     <- accepted + 1
+    }
+    
+    samples[i, ] <- beta_current
+  }
+  
+  cat("Acceptance rate:", round(accepted / n_iter, 3), "\n")
+  colnames(samples) <- colnames(X)
+  return(samples)
+}
+```
+
+```{r}
+set.seed(42)
+cat("Running Metropolis-Hastings...\n")
+samples <- run_mh(X_train, y_train, n_iter = 3000, step_size = 0.02)
+```
+
+## Burn-in and Posterior Samples
+
+```{r}
+# discard first 500 samples as burn-in
+burn_in <- 500
+post_samples <- samples[(burn_in + 1):nrow(samples), ]
+
+cat("Posterior samples after burn-in:", nrow(post_samples), "\n")
+```
+
+## Trace Plots
+
+```{r}
+# trace plots for first few coefficients to check convergence
+par(mfrow = c(2, 2))
+
+for (i in 1:4) {
+  plot(samples[, i], type = "l",
+       main = paste("Trace:", colnames(samples)[i]),
+       xlab = "Iteration", ylab = "Value",
+       col = "steelblue", lwd = 0.5)
+  abline(v = burn_in, col = "red", lty = 2)
+}
+
+par(mfrow = c(1, 1))
+```
+
+## Posterior Summaries
+
+```{r}
+# posterior mean and 95% credible intervals for each coefficient
+post_mean <- colMeans(post_samples)
+post_ci   <- apply(post_samples, 2, quantile, probs = c(0.025, 0.975))
+
+summary_df <- data.frame(
+  coefficient = colnames(post_samples),
+  mean        = round(post_mean, 4),
+  lower_95    = round(post_ci[1, ], 4),
+  upper_95    = round(post_ci[2, ], 4)
+)
+
+# flag coefficients whose CI doesn't include 0
+summary_df$significant <- ifelse(
+  summary_df$lower_95 > 0 | summary_df$upper_95 < 0, "*", ""
+)
+
+print(summary_df)
+```
+
+## Posterior Coefficient Plot
+
+```{r}
+ggplot(summary_df, aes(x = mean, y = reorder(coefficient, mean))) +
+  geom_point(color = "steelblue", size = 2) +
+  geom_errorbarh(aes(xmin = lower_95, xmax = upper_95), height = 0.3, color = "steelblue") +
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Posterior Coefficients with 95% Credible Intervals",
+       x = "Coefficient Value", y = "") +
+  theme_minimal()
+```
+
+## Classification on Test Set
+
+```{r}
+# use posterior mean as point estimate for prediction
+beta_hat <- post_mean
+
+prob_test <- sigmoid(X_test %*% beta_hat)
+pred_test <- ifelse(prob_test > 0.5, 1, 0)
+
+conf_mat <- table(Predicted = pred_test, Actual = y_test)
+print(conf_mat)
+
+accuracy <- mean(pred_test == y_test)
+cat("Test accuracy:", round(accuracy, 4), "\n")
+
+tp <- conf_mat[2, 2]
+fp <- conf_mat[2, 1]
+fn <- conf_mat[1, 2]
+
+precision <- tp / (tp + fp)
+recall    <- tp / (tp + fn)
+f1        <- 2 * precision * recall / (precision + recall)
+
+cat("Precision:", round(precision, 4), "\n")
+cat("Recall:",    round(recall, 4), "\n")
+cat("F1 Score:",  round(f1, 4), "\n")
+```
+
+## Posterior Predictive Check
+
+```{r}
+# distribution of test accuracy across posterior samples
+n_check <- 200
+ppc_acc <- numeric(n_check)
+
+for (i in 1:n_check) {
+  b <- post_samples[i, ]
+  p <- sigmoid(X_test %*% b)
+  preds <- ifelse(p > 0.5, 1, 0)
+  ppc_acc[i] <- mean(preds == y_test)
+}
+
+ggplot(data.frame(accuracy = ppc_acc), aes(x = accuracy)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white", alpha = 0.8) +
+  geom_vline(xintercept = accuracy, color = "red", linetype = "dashed", linewidth = 1) +
+  labs(title = "Posterior Predictive Check: Distribution of Test Accuracy",
+       subtitle = "Red line = accuracy using posterior mean",
+       x = "Accuracy", y = "Count") +
+  theme_minimal()
+```
