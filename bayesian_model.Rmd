@@ -1,9 +1,8 @@
 ---
-title: 'Bayesian Logistic Regression: Predicting Shooting Incidents in Boston'
+title: 'Bayesian Logistic Regression'
 author: "DS 4420 Final Project"
 output:
   pdf_document: default
-  html_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -15,6 +14,7 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 ```{r}
 library(ggplot2)
 library(dplyr)
+library(brms)
 ```
 
 ## Load and Prepare Data
@@ -35,6 +35,9 @@ df <- df[complete.cases(df), ]
 # encode DAY_OF_WEEK as numeric
 day_levels <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 df$DAY_OF_WEEK <- as.numeric(factor(df$DAY_OF_WEEK, levels = day_levels))
+
+# brms needs SHOOTING as factor for bernoulli family
+df$SHOOTING <- as.factor(df$SHOOTING)
 
 cat("Size after cleaning:", nrow(df), "\n")
 cat("Any NAs:", anyNA(df), "\n")
@@ -61,148 +64,78 @@ cat("Shooting distribution after undersampling:\n")
 print(table(df_balanced$SHOOTING))
 ```
 
-## Build Design Matrix
-
-```{r}
-# one-hot encode DISTRICT
-district_dummies <- model.matrix(~ DISTRICT - 1, data = df_balanced)
-
-# combine all features into X matrix
-X <- cbind(
-  intercept = 1,
-  month     = df_balanced$MONTH,
-  hour      = df_balanced$HOUR,
-  day       = df_balanced$DAY_OF_WEEK,
-  district_dummies
-)
-
-y <- df_balanced$SHOOTING
-
-cat("Design matrix dimensions:", dim(X), "\n")
-```
-
 ## Train / Test Split
 
 ```{r}
 set.seed(42)
 
-n <- nrow(X)
+n <- nrow(df_balanced)
 train_idx <- sample(1:n, size = floor(0.8 * n))
 
-X_train <- X[train_idx, ]
-X_test  <- X[-train_idx, ]
-y_train <- y[train_idx]
-y_test  <- y[-train_idx]
+df_train <- df_balanced[train_idx, ]
+df_test  <- df_balanced[-train_idx, ]
 
-cat("Train size:", nrow(X_train), "\n")
-cat("Test size:", nrow(X_test), "\n")
+cat("Train size:", nrow(df_train), "\n")
+cat("Test size:", nrow(df_test), "\n")
 ```
 
-## Bayesian Logistic Regression via Metropolis-Hastings
+## Bayesian Logistic Regression via brms
 
 ```{r}
-# sigmoid function
-sigmoid <- function(z) 1 / (1 + exp(-z))
+# check default priors for our model
+def_prior <- default_prior(
+  SHOOTING ~ MONTH + HOUR + DAY_OF_WEEK + DISTRICT,
+  data   = df_train,
+  family = bernoulli("logit")
+)
 
-# log likelihood of logistic regression
-log_likelihood <- function(beta, X, y) {
-  p <- sigmoid(X %*% beta)
-  p <- pmax(p, 1e-10)
-  p <- pmin(p, 1 - 1e-10)
-  sum(y * log(p) + (1 - y) * log(1 - p))
-}
-
-# log prior: Normal(0, 1) on all coefficients
-log_prior <- function(beta) {
-  sum(dnorm(beta, mean = 0, sd = 1, log = TRUE))
-}
-
-# log posterior = log likelihood + log prior
-log_posterior <- function(beta, X, y) {
-  log_likelihood(beta, X, y) + log_prior(beta)
-}
+print(def_prior)
 ```
 
 ```{r}
-# Metropolis-Hastings sampler
-run_mh <- function(X, y, n_iter = 3000, step_size = 0.02) {
-  p <- ncol(X)
-  
-  beta_current <- rep(0, p)
-  lp_current   <- log_posterior(beta_current, X, y)
-  
-  samples  <- matrix(0, nrow = n_iter, ncol = p)
-  accepted <- 0
-  
-  for (i in 1:n_iter) {
-    beta_proposed <- beta_current + rnorm(p, sd = step_size)
-    lp_proposed   <- log_posterior(beta_proposed, X, y)
-    
-    # skip if log posterior is NaN or Inf
-    if (is.nan(lp_proposed) || is.infinite(lp_proposed)) {
-      samples[i, ] <- beta_current
-      next
-    }
-    
-    log_ratio <- lp_proposed - lp_current
-    
-    if (log(runif(1)) < log_ratio) {
-      beta_current <- beta_proposed
-      lp_current   <- lp_proposed
-      accepted     <- accepted + 1
-    }
-    
-    samples[i, ] <- beta_current
-  }
-  
-  cat("Acceptance rate:", round(accepted / n_iter, 3), "\n")
-  colnames(samples) <- colnames(X)
-  return(samples)
-}
-```
-
-```{r}
+# fit the model
 set.seed(42)
-cat("Running Metropolis-Hastings...\n")
-samples <- run_mh(X_train, y_train, n_iter = 3000, step_size = 0.02)
+brm_fit <- brm(
+  SHOOTING ~ MONTH + HOUR + DAY_OF_WEEK + DISTRICT,
+  family  = bernoulli("logit"),
+  data    = df_train,
+  prior   = def_prior,
+  chains  = 4,
+  iter    = 2000,
+  warmup  = 500,
+  cores   = 1,
+  seed    = 42
+)
 ```
 
-## Burn-in and Posterior Samples
+## Model Summary
 
 ```{r}
-# discard first 500 samples as burn-in
-burn_in <- 500
-post_samples <- samples[(burn_in + 1):nrow(samples), ]
-
-cat("Posterior samples after burn-in:", nrow(post_samples), "\n")
+summary(brm_fit)
 ```
 
 ## Trace Plots
 
 ```{r}
-# trace plots for first few coefficients to check convergence
-par(mfrow = c(2, 2))
-
-for (i in 1:4) {
-  plot(samples[, i], type = "l",
-       main = paste("Trace:", colnames(samples)[i]),
-       xlab = "Iteration", ylab = "Value",
-       col = "steelblue", lwd = 0.5)
-  abline(v = burn_in, col = "red", lty = 2)
-}
-
-par(mfrow = c(1, 1))
+# trace plots to check convergence
+plot(brm_fit, ask = FALSE)
 ```
 
 ## Posterior Summaries
 
 ```{r}
-# posterior mean and 95% credible intervals for each coefficient
-post_mean <- colMeans(post_samples)
-post_ci   <- apply(post_samples, 2, quantile, probs = c(0.025, 0.975))
+# extract posterior draws
+post_draws <- as.data.frame(brm_fit)
+
+# get coefficient names
+coef_cols <- grep("^b_", names(post_draws), value = TRUE)
+
+# posterior mean and 95% credible intervals
+post_mean <- colMeans(post_draws[, coef_cols])
+post_ci   <- apply(post_draws[, coef_cols], 2, quantile, probs = c(0.025, 0.975))
 
 summary_df <- data.frame(
-  coefficient = colnames(post_samples),
+  coefficient = coef_cols,
   mean        = round(post_mean, 4),
   lower_95    = round(post_ci[1, ], 4),
   upper_95    = round(post_ci[2, ], 4)
@@ -231,16 +164,18 @@ ggplot(summary_df, aes(x = mean, y = reorder(coefficient, mean))) +
 ## Classification on Test Set
 
 ```{r}
-# use posterior mean as point estimate for prediction
-beta_hat <- post_mean
+# get posterior predictive probabilities on test set
+prob_test <- posterior_epred(brm_fit, newdata = df_test)
 
-prob_test <- sigmoid(X_test %*% beta_hat)
-pred_test <- ifelse(prob_test > 0.5, 1, 0)
+# use posterior mean probability for classification
+prob_mean <- colMeans(prob_test)
+pred_test <- ifelse(prob_mean > 0.5, 1, 0)
+y_test    <- as.numeric(as.character(df_test$SHOOTING))
 
 conf_mat <- table(Predicted = pred_test, Actual = y_test)
 print(conf_mat)
 
-accuracy <- mean(pred_test == y_test)
+accuracy  <- mean(pred_test == y_test)
 cat("Test accuracy:", round(accuracy, 4), "\n")
 
 tp <- conf_mat[2, 2]
@@ -260,13 +195,11 @@ cat("F1 Score:",  round(f1, 4), "\n")
 
 ```{r}
 # distribution of test accuracy across posterior samples
-n_check <- 200
-ppc_acc <- numeric(n_check)
+n_check  <- 200
+ppc_acc  <- numeric(n_check)
 
 for (i in 1:n_check) {
-  b <- post_samples[i, ]
-  p <- sigmoid(X_test %*% b)
-  preds <- ifelse(p > 0.5, 1, 0)
+  preds      <- ifelse(prob_test[i, ] > 0.5, 1, 0)
   ppc_acc[i] <- mean(preds == y_test)
 }
 
