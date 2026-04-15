@@ -1,7 +1,6 @@
-.ipynb_checkpoints/
+.RData
 .Rhistory
 *.csv
 *.xlsx
 .DS_Store
-
-.RData
+.ipynb_checkpoints/
