@@ -1,6 +1,7 @@
 .RData
 .Rhistory
 *.csv
+!boston_crime_combined.csv
 *.xlsx
 .DS_Store
 .ipynb_checkpoints/
